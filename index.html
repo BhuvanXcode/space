@@ -236,6 +236,36 @@
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
   }
+
+  #pause-screen .pause-title {
+    font-size: clamp(36px, 7vw, 64px);
+    font-weight: 900;
+    letter-spacing: 8px;
+    color: var(--neon-cyan);
+    text-shadow: 0 0 20px var(--neon-cyan), 0 0 60px rgba(0,255,255,0.4);
+  }
+  #pause-screen .pause-hint {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    color: rgba(0,255,255,0.5);
+    letter-spacing: 3px;
+    margin-top: 20px;
+  }
+
+  #multishot-timer {
+    position: fixed;
+    top: 80px;
+    right: 28px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    color: var(--neon-yellow);
+    text-shadow: 0 0 10px var(--neon-yellow);
+    z-index: 15;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+    text-align: right;
+  }
 </style>
 </head>
 <body>
@@ -262,8 +292,17 @@
 <div id="wave-announce">WAVE 01</div>
 <div id="combo-display">x2 COMBO!</div>
 
+<div id="multishot-timer"></div>
+
 <div id="game-wrap">
   <canvas id="game"></canvas>
+</div>
+
+<!-- PAUSE SCREEN -->
+<div class="screen hidden" id="pause-screen">
+  <div class="pause-title">PAUSED</div>
+  <div class="pause-hint">PRESS [P] OR [ESC] TO RESUME</div>
+  <button class="btn" id="resume-btn" style="margin-top:36px">RESUME</button>
 </div>
 
 <!-- START SCREEN -->
@@ -272,8 +311,9 @@
   <div class="subtitle">// GALACTIC ANNIHILATION PROTOCOL //</div>
   <button class="btn" id="start-btn">ENGAGE</button>
   <div class="controls-hint">
-    ← → MOVE &nbsp;|&nbsp; SPACE / CLICK FIRE &nbsp;|&nbsp; SURVIVE
+    ← → ↑ ↓ MOVE &nbsp;|&nbsp; SPACE / CLICK FIRE &nbsp;|&nbsp; P / ESC PAUSE
   </div>
+  <div id="start-highscore" style="font-family:'Share Tech Mono',monospace;font-size:12px;color:rgba(0,255,255,0.45);letter-spacing:3px;margin-top:18px;"></div>
 </div>
 
 <!-- GAME OVER SCREEN -->
@@ -325,19 +365,21 @@ const H = Math.min(window.innerHeight - 80, 700);
 canvas.width = W; canvas.height = H;
 
 // State
-let score=0, lives=3, wave=1, gameRunning=false;
+let score=0, lives=3, wave=1, gameRunning=false, gamePaused=false;
 let highScore = parseInt(localStorage.getItem('vb_hs')||'0');
 let combo=0, comboTimer=0;
 let particles=[], bullets=[], enemies=[], stars2=[], powerups=[];
 let explosions=[];
 let waveTimer=0, waveTransition=false;
 let bossActive=false;
+let multishotTimer=0;
 
 // Controls
 const keys = {};
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'Space') { e.preventDefault(); fireBullet(); }
+  if ((e.code === 'KeyP' || e.code === 'Escape') && gameRunning) togglePause();
 });
 document.addEventListener('keyup', e => keys[e.code] = false);
 canvas.addEventListener('click', () => fireBullet());
@@ -346,7 +388,7 @@ canvas.addEventListener('click', () => fireBullet());
 let player = { x:W/2, y:H-80, w:36, h:36, speed:5, iframes:0, shield:false };
 
 function resetGame() {
-  score=0; lives=3; wave=1; combo=0; waveTimer=0;
+  score=0; lives=3; wave=1; combo=0; waveTimer=0; multishotTimer=0;
   bullets=[]; enemies=[]; particles=[]; powerups=[]; explosions=[];
   bossActive=false; waveTransition=false;
   player.x = W/2; player.y = H-80; player.iframes=0; player.shield=false;
@@ -409,13 +451,14 @@ function spawnWave() {
 // ─── FIRE ─────────────────────────────────────────────
 let lastFire=0;
 function fireBullet() {
-  if (!gameRunning) return;
+  if (!gameRunning || gamePaused) return;
   const now = Date.now();
   if (now - lastFire < 180) return;
   lastFire = now;
   bullets.push({ x:player.x, y:player.y-player.h/2, w:4, h:14, dy:-13, fromPlayer:true });
-  if (wave >= 4) bullets.push({ x:player.x-14, y:player.y-player.h/2+6, w:3, h:10, dy:-12, dx:-1, fromPlayer:true });
-  if (wave >= 4) bullets.push({ x:player.x+14, y:player.y-player.h/2+6, w:3, h:10, dy:-12, dx:1, fromPlayer:true });
+  const tripleShot = wave >= 4 || multishotTimer > 0;
+  if (tripleShot) bullets.push({ x:player.x-14, y:player.y-player.h/2+6, w:3, h:10, dy:-12, dx:-1, fromPlayer:true });
+  if (tripleShot) bullets.push({ x:player.x+14, y:player.y-player.h/2+6, w:3, h:10, dy:-12, dx:1, fromPlayer:true });
 }
 
 // ─── PARTICLES ────────────────────────────────────────
@@ -490,6 +533,7 @@ function drawHealthBar(e) {
 let lastTime=0;
 function gameLoop(ts) {
   if (!gameRunning) return;
+  if (gamePaused) { requestAnimationFrame(gameLoop); return; }
   const dt = Math.min((ts-lastTime)/16.67,3);
   lastTime=ts;
 
@@ -587,6 +631,7 @@ function gameLoop(ts) {
     p.y+=1.2*dt; p.life-=dt;
     if(Math.abs(p.x-player.x)<20 && Math.abs(p.y-player.y)<20) {
       if(p.type==='shield') player.shield=true;
+      if(p.type==='multishot') multishotTimer = Math.max(multishotTimer, 300); // 5 seconds at 60fps
       spawnExplosion(p.x,p.y,'#ffee00',10);
       p.life=0;
     }
@@ -596,6 +641,16 @@ function gameLoop(ts) {
   // ── COMBO TIMER ──
   if(comboTimer>0) { comboTimer-=dt; }
   else { combo=0; }
+
+  // ── MULTISHOT TIMER ──
+  if(multishotTimer>0) { multishotTimer-=dt; }
+  const msEl = document.getElementById('multishot-timer');
+  if(multishotTimer>0) {
+    msEl.textContent = `★ MULTISHOT ${Math.ceil(multishotTimer/60)}s`; // convert frames to seconds
+    msEl.style.opacity='1';
+  } else {
+    msEl.style.opacity='0';
+  }
 
   // ── WAVE CLEAR ──
   if(!waveTransition && enemies.every(e=>e.dead)) {
@@ -689,6 +744,17 @@ function gameLoop(ts) {
   requestAnimationFrame(gameLoop);
 }
 
+function togglePause() {
+  gamePaused = !gamePaused;
+  const ps = document.getElementById('pause-screen');
+  if(gamePaused) {
+    ps.classList.remove('hidden');
+  } else {
+    ps.classList.add('hidden');
+    lastTime = performance.now(); // reset lastTime so dt doesn't spike on resume
+  }
+}
+
 function endGame() {
   gameRunning=false;
   const isHigh = score>highScore;
@@ -701,6 +767,8 @@ function endGame() {
 function startGame() {
   document.getElementById('start-screen').classList.add('hidden');
   document.getElementById('gameover-screen').classList.add('hidden');
+  document.getElementById('pause-screen').classList.add('hidden');
+  gamePaused = false;
   gameRunning=true;
   resetGame();
   lastTime=performance.now();
@@ -709,9 +777,17 @@ function startGame() {
 
 document.getElementById('start-btn').addEventListener('click', startGame);
 document.getElementById('restart-btn').addEventListener('click', startGame);
+document.getElementById('resume-btn').addEventListener('click', togglePause);
 document.addEventListener('keydown', e=>{
   if(e.code==='Enter' && !gameRunning) startGame();
 });
+
+// Show high score on start screen
+(function() {
+  const hs = parseInt(localStorage.getItem('vb_hs')||'0');
+  const el = document.getElementById('start-highscore');
+  if(hs > 0) el.textContent = `BEST: ${String(hs).padStart(6,'0')}`;
+})();
 </script>
 </body>
 </html>
